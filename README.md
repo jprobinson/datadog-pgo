@@ -20,6 +20,41 @@ That's it. The go toolchain will automatically pick up any `default.pgo` file in
 Note: You should always use the `datadog-pgo@latest` version as shown above. Old versions may become deprecated and stop working on short notice.
 
 
+## Using as a library
+
+If you are wrapping the build step in your own Go tooling and would rather not shell out to a binary, import `github.com/DataDog/datadog-pgo/pgo` and call `pgo.Fetch`:
+
+```go
+import (
+    "context"
+    "log/slog"
+    "os"
+
+    "github.com/DataDog/datadog-pgo/pgo"
+)
+
+func main() {
+    err := pgo.Fetch(
+        context.Background(),
+        []string{"service:foo env:prod"},
+        "./cmd/foo/default.pgo",
+        pgo.Options{
+            Logger:   slog.New(slog.NewTextHandler(os.Stdout, nil)),
+            SoftFail: true, // log+swallow errors so the build can continue without PGO
+        },
+    )
+    if err != nil {
+        // Only reachable when SoftFail is false.
+        panic(err)
+    }
+}
+```
+
+`pgo.Fetch` reads `DD_API_KEY`, `DD_APP_KEY`, and `DD_SITE` from the environment by default; override them via the `APIKey`, `AppKey`, and `Site` fields on `pgo.Options` if you fetch credentials another way (e.g. AWS SSM). For finer control, the low-level building blocks (`pgo.Client`, `pgo.BuildQueries`, `pgo.SearchDownloadMerge`, `pgo.MergedProfile`) are also exported.
+
+The library is published as a sub-module of this repo, so consumers pull only the library dependency graph (`google/pprof` + `sourcegraph/conc`) without the CLI's TTY/logging dependencies.
+
+
 ## CLI
 
 <!-- scripts/update_readme.go -->
