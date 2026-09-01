@@ -1,13 +1,7 @@
-// Package pgo fetches CPU profiles from Datadog and merges them into a single
-// profile suitable for profile-guided optimization (PGO) of Go binaries.
-//
-// This package exposes the same building blocks the datadog-pgo command-line
-// tool uses internally: Client for API access, BuildQueries / SearchQuery
-// helpers, SearchDownloadMerge for the parallel fetch, MergedProfile for the
-// final result, and ApplyNoInlineHack for the inlining workaround.
-//
-// The datadog-pgo command, available at the root of this module, is a thin
-// wrapper around this package.
+// Package pgo contains the profile fetching and merging logic used by the
+// datadog-pgo command-line tool. It is an internal implementation detail of
+// the tool and not a supported public API; consumers should invoke the
+// datadog-pgo command directly.
 package pgo
 
 import (
