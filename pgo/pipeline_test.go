@@ -13,15 +13,17 @@ import (
 	"github.com/google/pprof/profile"
 )
 
-// doNotInlineFunc is a function the noinline hack is expected to rename when
-// it appears as a leaf in the testdata profile.
-const doNotInlineFunc = "google.golang.org/grpc/internal/transport.(*loopyWriter).processData"
+// noInlineTargets is the set of functions ApplyNoInlineHack is configured to
+// rename when they appear as the leaf of a sample. It mirrors the list in
+// noinline.go so this test stays in sync with what the hack actually targets.
+var noInlineTargets = []string{grpcProcessDataFunc, runtimeGoparkFunc}
 
 // TestMergedProfilePipeline exercises the same code path the datadog-pgo CLI
-// drives against the Datadog gopgo endpoint: it packages the bundled testdata
-// profile as the ZIP the endpoint returns, then runs
+// drives against the gopgo endpoint: it packages the bundled testdata profile
+// as the ZIP the endpoint returns, then runs
 // ProfilesDownload.MergedProfile -> ApplyNoInlineHack -> Write, and asserts the
-// result is a valid, deterministic .pgo file with the noinline hack applied.
+// result is a valid, deterministic .pgo file with the no-inline workaround
+// applied.
 //
 // It needs no network access and no Datadog credentials.
 func TestMergedProfilePipeline(t *testing.T) {
@@ -76,6 +78,36 @@ func TestMergedProfilePipeline(t *testing.T) {
 		return n, samples, sha
 	}
 
+	// leafTargets returns the subset of noInlineTargets that appear as the leaf
+	// function of at least one sample in prof. ApplyNoInlineHack only renames
+	// a target when it is a leaf, so the assertions below are conditioned on
+	// this set rather than assuming a specific target is present. This must be
+	// computed from the pre-hack profile, since afterwards the targets are
+	// already renamed and no longer match.
+	leafTargets := func(prof *profile.Profile) map[string]bool {
+		targets := make(map[string]bool, len(noInlineTargets))
+		for _, name := range noInlineTargets {
+			targets[name] = false
+		}
+		for _, s := range prof.Sample {
+			leaf, ok := leafLine(s)
+			if !ok || leaf.Function == nil {
+				continue
+			}
+			if _, want := targets[leaf.Function.Name]; want {
+				targets[leaf.Function.Name] = true
+			}
+		}
+		return targets
+	}
+
+	// Derive the expected renamed set from the raw testdata, before the hack.
+	rawProfile, err := profile.ParseData(profBytes)
+	if err != nil {
+		t.Fatalf("parse raw testdata: %v", err)
+	}
+	targets := leafTargets(rawProfile)
+
 	dir := t.TempDir()
 	out1 := filepath.Join(dir, "default.pgo")
 	n, samples, sha1 := runPipeline(out1)
@@ -97,24 +129,33 @@ func TestMergedProfilePipeline(t *testing.T) {
 		t.Fatalf("parsed sample count %d != merged %d", len(parsed.Sample), samples)
 	}
 
-	// The noinline hack must have renamed the target leaf function. The
-	// testdata profile is known to contain doNotInlineFunc as a leaf, so after
-	// ApplyNoInlineHack no function may still bear that exact name and at
-	// least one must carry the DO NOT INLINE prefix.
-	var hasRenamed, hasUnrenamed bool
-	for _, f := range parsed.Function {
-		switch f.Name {
-		case doNotInlineFunc:
-			hasUnrenamed = true
-		case doNotInlinePrefix + doNotInlineFunc:
-			hasRenamed = true
+	// The no-inline workaround renames specific leaf functions to discourage
+	// bad inlining decisions (see golang/go#65532). profile.Function objects
+	// are shared across all references to the same function, so renaming a leaf
+	// renames every occurrence of that function.
+	//
+	// Rather than assume a specific target is present in the testdata, derive
+	// the expected set from the raw testdata: a target is expected to be
+	// renamed iff it appears as a leaf of some sample.
+	anyRenamed := false
+	for name, isLeaf := range targets {
+		if !isLeaf {
+			continue
+		}
+		anyRenamed = true
+		renamed := doNotInlinePrefix + name
+		if !functionExists(parsed, renamed) {
+			t.Errorf("no-inline workaround did not rename leaf %q to %q", name, renamed)
+		}
+		if functionExists(parsed, name) {
+			t.Errorf("leaf %q was renamed but an unmodified %q still exists (Function not shared?)", name, name)
 		}
 	}
-	if hasUnrenamed {
-		t.Errorf("noinline hack did not rename %q (still present unmodified)", doNotInlineFunc)
-	}
-	if !hasRenamed {
-		t.Errorf("noinline hack did not produce %q%s", doNotInlinePrefix, doNotInlineFunc)
+	// Guard against the test becoming vacuous: if the testdata no longer has
+	// any of the no-inline targets as a leaf, the workaround is not exercised
+	// at all and this test should fail loudly rather than silently pass.
+	if !anyRenamed {
+		t.Fatalf("testdata exercises none of the no-inline targets %v as a leaf; test is vacuous", noInlineTargets)
 	}
 
 	// The pipeline must be deterministic: a second run yields byte-identical
@@ -128,6 +169,16 @@ func TestMergedProfilePipeline(t *testing.T) {
 	if sha1 != sha2 {
 		t.Errorf("non-deterministic output: sha256 differs between runs")
 	}
+}
+
+// functionExists reports whether prof contains a function with the exact name.
+func functionExists(prof *profile.Profile, name string) bool {
+	for _, f := range prof.Function {
+		if f.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func mustRead(t *testing.T, path string) []byte {
